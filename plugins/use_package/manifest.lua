@@ -31,6 +31,10 @@ function M.downloadRepo(repo)
   local tag = util.repoTag(repo)
   local dir = repoLocalDir(repo)
 
+  if tag and tag:sub(1, 1) == '-' then
+    return '[use-package] invalid tag: ' .. tag, -1
+  end
+
   if util.isLocalPath(url) then
     if not util.fileExists(url .. '/manifest.json') then
       return string.format('[use-package] local manifest not found: %s/manifest.json', url), -1
@@ -42,7 +46,10 @@ function M.downloadRepo(repo)
   system.mkdir(REPOS_DIR)   -- ensure parent exists on first run
 
   if not util.fileExists(dir) then
-    local out, code = util.exec({'git', 'clone', url, dir})
+    if not util.validCloneURL(url) then
+      return '[use-package] unsupported repository URL: ' .. url, -1
+    end
+    local out, code = util.exec({'git', 'clone', '--quiet', '--', url, dir})
     if code ~= 0 then
       return out, code
     end
@@ -50,7 +57,7 @@ function M.downloadRepo(repo)
 
   if tag then
     -- cross-platform checkout using git -C instead of sh -c
-    local out, code = util.gitCmd({'checkout', tag}, dir)
+    local out, code = util.gitCmd({'checkout', '--quiet', tag, '--'}, dir)
     if code ~= 0 then
       return out, code
     end
@@ -63,7 +70,35 @@ end
 -- Pull the latest changes for an already-cloned repo, then re-cache the manifest.
 -- If repo is not yet cloned, downloads it first.
 -- For local paths, simply refreshes the cached manifest.
+local updating = {}   -- repo dir -> true while an update runs
+local updated  = {}   -- repo dir -> {time=, res={...}} of the last successful update
+local RECENT   = 60   -- seconds a successful update is reused
+
+local doUpdateRepo
+
+-- Several plugins share one repo and are updated from separate threads at
+-- startup. Concurrent git fetches on one repo interleave their FETCH_HEAD
+-- writes, and `pull --ff-only` then fails with "Cannot fast-forward to
+-- multiple branches". So run one update per repo at a time and let the
+-- others reuse its result.
 function M.updateRepo(repo)
+  local dir = repoLocalDir(repo)
+  while updating[dir] do coroutine.yield() end
+  local last = updated[dir]
+  if last and system.get_time() - last.time < RECENT then
+    return table.unpack(last.res, 1, 3)
+  end
+  updating[dir] = true
+  local res = table.pack(pcall(doUpdateRepo, repo))
+  updating[dir] = nil
+  if not res[1] then error(res[2], 0) end
+  if res[3] == 0 then
+    updated[dir] = { time = system.get_time(), res = { res[2], res[3], res[4] } }
+  end
+  return res[2], res[3], res[4]
+end
+
+doUpdateRepo = function(repo)
   local url = util.repoURL(repo)
   if util.isLocalPath(url) then
     updateManifestCache(repo)
@@ -74,17 +109,45 @@ function M.updateRepo(repo)
     return M.downloadRepo(repo)
   end
   local tag = util.repoTag(repo)
-  local out, code = util.gitCmd({'pull'}, dir)
-  if tag and code == 0 then
-    util.gitCmd({'checkout', tag}, dir)
+  local before = util.gitHead(dir)
+  local out, code
+  if tag then
+    -- A pinned tag leaves HEAD detached, where `git pull` fails: fetch, then checkout.
+    out, code = util.gitCmd({'fetch', '--quiet', '--tags', '--prune'}, dir)
+    if code == 0 then
+      out, code = util.gitCmd({'checkout', '--quiet', tag, '--'}, dir)
+    end
+    if code == 0 then
+      -- if the pin is a branch, move it forward; harmless failure on a tag
+      util.gitCmd({'merge', '--quiet', '--ff-only', '@{u}'}, dir)
+    end
+  else
+    out, code = util.gitCmd({'pull', '--quiet', '--ff-only'}, dir)
   end
   if code == 0 then
     updateManifestCache(repo)
   end
-  return out, code
+  return out, code, before ~= util.gitHead(dir)
 end
 
 M.updateManifestCache = updateManifestCache
+
+-- config.plugins.use_package.repo_overrides maps a repo URL (without tag) to
+-- a local path used in its place, e.g. a checkout of that repo.
+-- Returns the path for an overridden repo, else `repo` unchanged.
+function M.override(repo)
+  local overrides = require('core.config').plugins.use_package.repo_overrides
+  local path = overrides and overrides[util.repoURL(repo)]
+  return path or repo
+end
+
+-- M.override for a hex-encoded repo URL.
+function M.overrideHex(hex)
+  local url  = util.dehexify(hex)
+  local repo = M.override(url)
+  if repo == url then return hex end
+  return util.repoDir(repo)
+end
 
 -- Search all cached manifests (or a specific one if repo_hex is given) for an
 -- addon whose id matches `name`.  Returns (addon_table, repo_hex) or (nil, nil).
