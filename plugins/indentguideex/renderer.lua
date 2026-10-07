@@ -19,7 +19,8 @@ local DEFAULT_RAINBOW_COLORS = {
 ---@param line integer
 ---@param x number
 ---@param y number
-function Renderer.draw_line(docview, line, x, y)
+---@param line_h number? height drawn for the line, all its rows when wrapped
+function Renderer.draw_line(docview, line, x, y, line_h)
   local conf = config.plugins.indentguideex
   if not conf or not conf.enabled or not docview.doc or docview.doc.large_file then
     return
@@ -38,7 +39,11 @@ function Renderer.draw_line(docview, line, x, y)
     docview._igex_space_sz = space_sz
     docview._igex_font = font
   end
-  local h = docview:get_line_height()
+  local lh = docview:get_line_height()
+  -- continuation rows of a wrapped line start at this x offset: guides left
+  -- of it span every row, the others only the first (text is under them)
+  local wrap_x = docview.wrapped_line_offsets and docview.wrapped_line_offsets[line] or 0
+  local full_h = line_h or lh
 
   local w = conf.line_width or math.max(1, math.ceil(space_sz * 0.15))
   local guide_style = conf.style or "solid"
@@ -66,6 +71,7 @@ function Renderer.draw_line(docview, line, x, y)
     end
 
     local rx = math.ceil(x + space_sz * i)
+    local h = (space_sz * i < wrap_x) and full_h or lh
 
     if guide_style == "solid" then
       renderer.draw_rect(rx, y, w, h, color)

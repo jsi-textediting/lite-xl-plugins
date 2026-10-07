@@ -24,12 +24,14 @@ local state = {
   label_input = "",      -- prefix typed so far during select phase
 }
 
--- Hook draw_line_text so that labels are painted ON TOP of the existing text.
--- We call old_draw_line_text first (text renders), then overdraw the label boxes.
-local old_draw_line_text = DocView.draw_line_text
+-- Hook draw_overlay so that labels are painted ON TOP of all line text.
+-- Not draw_line_text: plugins loaded later may replace it without chaining
+-- (linewrapping draws wrapped lines itself), which would drop the labels.
+-- get_line_screen_position() is wrap-aware, so labels land on wrapped rows.
+local old_draw_overlay = DocView.draw_overlay
 
-function DocView:draw_line_text(line, x, y)
-  local result = old_draw_line_text(self, line, x, y)
+function DocView:draw_overlay(...)
+  local result = old_draw_overlay(self, ...)
 
   if not (state.active and state.phase == "select" and self == state.view) then
     return result
@@ -37,28 +39,26 @@ function DocView:draw_line_text(line, x, y)
 
   local lh     = self:get_line_height()
   local tyo    = self:get_line_text_y_offset()
+  local font   = self:get_font()
+  -- Padding derived from the font's own metrics rather than the raw
+  -- `SCALE' global -- `SCALE' only tracks live display-scale changes
+  -- when `config.plugins.scale.mode' is "ui"; the document's own font
+  -- (returned by `get_font()') always does, regardless of that mode.
+  local pad    = math.max(1, math.ceil(font:get_width(" ") * 0.3))
   local prefix = state.label_input
 
   for _, c in ipairs(state.candidates) do
-    if c.line == line then
-      -- Only show labels that still match the typed prefix.
-      if prefix == "" or c.label:sub(1, #prefix) == prefix then
-        local remaining = c.label:sub(#prefix + 1)
-        if remaining == "" then goto continue end
-        local cx   = x + self:get_col_x_offset(line, c.col)
-        local font = self:get_font()
-        -- Padding derived from the font's own metrics rather than the raw
-        -- `SCALE' global -- `SCALE' only tracks live display-scale changes
-        -- when `config.plugins.scale.mode' is "ui"; the document's own font
-        -- (returned by `get_font()') always does, regardless of that mode.
-        local pad = math.max(1, math.ceil(font:get_width(" ") * 0.3))
-        local lw  = font:get_width(remaining) + pad
-        renderer.draw_rect(cx, y, lw, lh, config.plugins.avy.label_bg)
+    -- Only show labels that still match the typed prefix.
+    if prefix == "" or c.label:sub(1, #prefix) == prefix then
+      local remaining = c.label:sub(#prefix + 1)
+      if remaining ~= "" then
+        local cx, cy = self:get_line_screen_position(c.line, c.col)
+        local lw = font:get_width(remaining) + pad
+        renderer.draw_rect(cx, cy, lw, lh, config.plugins.avy.label_bg)
         renderer.draw_text(font, remaining,
-          cx + pad / 2, y + tyo, config.plugins.avy.label_fg)
+          cx + pad / 2, cy + tyo, config.plugins.avy.label_fg)
       end
     end
-    ::continue::
   end
 
   return result

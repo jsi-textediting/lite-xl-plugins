@@ -110,9 +110,13 @@ function DocView:update(...)
 end
 
 local old_draw_line_text = DocView.draw_line_text
+-- Guides are drawn after the text (they sit in leading whitespace) so the
+-- returned height is known: linewrapping returns one line height per wrapped
+-- row, and the guides span all of them.
 function DocView:draw_line_text(line, x, y)
-  Renderer.draw_line(self, line, x, y)
-  return old_draw_line_text(self, line, x, y)
+  local h = old_draw_line_text(self, line, x, y)
+  Renderer.draw_line(self, line, x, y, h)
+  return h
 end
 
 -- ============================================================================

@@ -21,6 +21,41 @@ local state = {
   case_sensitive = false, -- per-session; seeded from config on each isearch_start
 }
 
+-- Paints the match at columns [s, e] of `line`.  Positions come from
+-- get_line_screen_position(), which linewrapping makes wrap-aware: a match on
+-- a wrapped continuation row lands on that row, and a match crossing a wrap
+-- break gets one rect per row.
+local function draw_match(dv, line, s, e, lh, color)
+  local text   = dv.doc.lines[line]
+  local font   = dv:get_font()
+  local x1, y1 = dv:get_line_screen_position(line, s)
+  local xe, ye = dv:get_line_screen_position(line, e)
+  if ye == y1 then
+    local x2, y2 = dv:get_line_screen_position(line, e + 1)
+    if y2 ~= y1 then
+      -- the match ends its row: extend over the last char instead
+      x2 = xe + font:get_width(text:sub(e, e))
+    end
+    renderer.draw_rect(x1, y1, x2 - x1, lh, color)
+    return
+  end
+  -- spans rows: walk the chars, flushing a rect whenever the row changes
+  local rx, ry, last_x, last_w = x1, y1, x1, 0
+  local col = s
+  while col <= e do
+    local n = col + 1
+    while n <= e and common.is_utf8_cont(text, n) do n = n + 1 end
+    local cx, cy = dv:get_line_screen_position(line, col)
+    if cy ~= ry then
+      renderer.draw_rect(rx, ry, last_x + last_w - rx, lh, color)
+      rx, ry = cx, cy
+    end
+    last_x, last_w = cx, font:get_width(text:sub(col, n - 1))
+    col = n
+  end
+  renderer.draw_rect(rx, ry, last_x + last_w - rx, lh, color)
+end
+
 -- Hook into draw_line_text so that highlight rects are painted BEFORE text,
 -- making text readable on top of the solid-color rectangles.
 local old_draw_line_text = DocView.draw_line_text
@@ -43,9 +78,7 @@ function DocView:draw_line_text(line, x, y)
         and state.match[2] == s
         and state.match[4] == e + 1
       if not is_current then
-        local x1 = x + self:get_col_x_offset(line, s)
-        local x2 = x + self:get_col_x_offset(line, e + 1)
-        renderer.draw_rect(x1, y, x2 - x1, lh, config.plugins.isearch.match_color)
+        draw_match(self, line, s, e, lh, config.plugins.isearch.match_color)
       end
       col = s + 1
     end
