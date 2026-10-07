@@ -29,7 +29,9 @@ end
 
 function M.get_search_root()
   local doc      = M.get_active_doc()
-  local file     = doc and doc.filename
+  -- (doc.filename is relative to the project: as a search root it would be
+  -- resolved against the local cwd, never against a remote project)
+  local file     = doc and (doc.abs_filename or doc.filename)
   local file_dir = file and common.dirname(file)
   if file_dir then
     local vcs_root = M.find_vcs_root(file_dir)

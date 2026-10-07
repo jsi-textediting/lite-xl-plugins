@@ -12,20 +12,34 @@
 --   ListView:get_status_text()          → string for header row 1
 --   ListView:draw_item(i, item, x, y, w, h)
 --   ListView:open_selected()            → called on Enter / click
+--
+-- Subclasses may implement:
+--   ListView:live_search(text)          → re-run the search for the filter
+--                                         text, called once typing pauses
+--                                         for config.plugins.listview.live_delay
 
 local core     = require "core"
 local common   = require "core.common"
 local config   = require "core.config"
 local command  = require "core.command"
 local style    = require "core.style"
+local process  = require "core.process"
 local Doc      = require "core.doc"
 local DocView  = require "core.docview"
 local View     = require "core.view"
 local RootView = require "core.rootview"
 
 config.plugins.listview = common.merge({
-  rows = 10,  -- number of result rows visible in the overlay panel
+  rows       = 10,   -- number of result rows visible in the overlay panel
+  live_delay = 0.3,  -- seconds of typing pause before a live search re-runs
 }, config.plugins.listview)
+
+-- Minimum seconds between re-filters while results are streaming in.
+local REFILTER_INTERVAL = 0.1
+-- Seconds of output processing per frame before the search thread yields.
+local READ_BUDGET = 0.008
+-- Bytes of stderr kept for the status line.
+local MAX_STDERR = 4096
 
 -- ---------------------------------------------------------------------------
 -- SingleLineDoc — a Doc that strips newlines so the filter stays on one line.
@@ -67,6 +81,18 @@ function ListView:new()
   self.filter_view.get_h_scrollable_size    = function() return 0 end
   self.filter_view.draw_line_highlight      = function() end
   self.filter_change_id = self.filter_doc:get_change_id()
+
+  -- Search state.
+  self.searching        = false
+  self.search_gen       = 0      -- bumped to cancel the running search
+  self.proc             = nil    -- process of the running search
+  self.search_error     = nil    -- stderr of a search that found nothing
+  self.base_results     = nil    -- complete results of the unfiltered search
+  self.live_text        = ""     -- filter text the current results were searched with
+  self.live_exact       = false  -- true: results for live_text are shown unfiltered
+  self.live_seq         = 0      -- bumped on each filter edit to debounce live_search
+  self.filter_dirty     = false  -- results changed since the last re-filter
+  self.last_filter_time = 0
 end
 
 function ListView:supports_text_input()
@@ -92,14 +118,17 @@ end
 -- false when streaming (preserve current selection).
 function ListView:update_filter(reset_selection)
   local ft = filter_text(self)
-  if ft == "" then
+  self.filter_dirty     = false
+  self.last_filter_time = system.get_time()
+  if ft == "" or (self.live_exact and ft == self.live_text) then
     self.filtered_results = self.results
   else
     local matches = {}
     local is_files = self.is_file_list or false
+    local needle = self:get_filter_needle(ft)
     for idx, item in ipairs(self.results) do
       local hay = self:get_item_text(item)
-      local score = common.fuzzy_match(hay, ft, is_files)
+      local score = common.fuzzy_match(hay, needle, is_files)
       if score then
         table.insert(matches, { item = item, score = score, idx = idx })
       end
@@ -120,11 +149,171 @@ function ListView:update_filter(reset_selection)
 end
 
 -- ---------------------------------------------------------------------------
+-- Search lifecycle
+-- ---------------------------------------------------------------------------
+
+-- Appends one result; the visible list is re-filtered at most every
+-- REFILTER_INTERVAL from update() instead of once per streamed line.
+function ListView:push_result(item)
+  if self.results_stale then
+    -- first result of a new search replaces the previous ones, so they stay
+    -- visible until there is something to show instead
+    self.results_stale = false
+    self.results       = {}
+    self.selected_idx  = 0
+    self.max_h_scroll  = 0
+    self.scroll.to.y   = 0
+  end
+  table.insert(self.results, item)
+  self.filter_dirty = true
+  core.redraw = true
+end
+
+-- Stops the running search, if any, and kills its process.
+function ListView:cancel_search()
+  self.search_gen = self.search_gen + 1
+  if self.proc then
+    pcall(self.proc.kill, self.proc)
+    self.proc = nil
+  end
+  self.searching = false
+end
+
+local function drain_stderr(proc, err)
+  while true do
+    local ok, chunk = pcall(proc.read_stderr, proc, 65536)
+    if not ok or not chunk or chunk == "" then return end
+    if #err.text < MAX_STDERR then err.text = err.text .. chunk end
+  end
+end
+
+-- Starts a search in a new thread, cancelling the running one. `fn(run)` is
+-- called inside the thread; `run(cmd, parse_line, max_results)` executes
+-- one command, adds parse_line(line) for each output line that parses, and
+-- returns the number of results, the exit code (nil when the process could
+-- not be started or was cut off at max_results) and its stderr.
+-- opts.base: the search is unfiltered, keep its results for restore_base_results().
+function ListView:start_search(fn, opts)
+  opts = opts or {}
+  self:cancel_search()
+  local gen = self.search_gen
+  self.searching     = true
+  self.search_error  = nil
+  self.results_stale = true
+  core.redraw = true
+
+  local function run(cmd, parse_line, max_results)
+    if self.search_gen ~= gen then return 0 end
+    local ok, proc = pcall(process.start, cmd)
+    if not ok or not proc then return 0, nil, tostring(proc) end
+    if self.search_gen ~= gen then pcall(proc.kill, proc) return 0 end
+    self.proc = proc
+    local count, rest, err = 0, "", { text = "" }
+    local done, exited = false, false
+    while not done do
+      local start = system.get_time()
+      while true do
+        local chunk = proc:read_stdout(65536)
+        -- end of output: nil, or still "" after the process exited (a
+        -- process that wrote nothing may never report end of stream)
+        if not chunk or (chunk == "" and exited) then done = true break end
+        if chunk == "" then
+          if proc:running() then break end
+          exited = true  -- read once more, output may still be buffered
+        end
+        rest = rest .. chunk
+        local pos = 1
+        while true do
+          local nl = rest:find("\n", pos, true)
+          if not nl then break end
+          local item = parse_line((rest:sub(pos, nl - 1):gsub("\r$", "")))
+          pos = nl + 1
+          if item then
+            count = count + 1
+            self:push_result(item)
+            if max_results and count >= max_results then
+              pcall(proc.kill, proc)
+              if self.proc == proc then self.proc = nil end
+              return count, nil, err.text
+            end
+          end
+        end
+        rest = rest:sub(pos)
+        if system.get_time() - start > READ_BUDGET then break end
+      end
+      -- keep stderr flowing so the process cannot block on a full pipe
+      drain_stderr(proc, err)
+      if not done then coroutine.yield() end
+      if self.search_gen ~= gen then
+        pcall(proc.kill, proc)
+        return count
+      end
+    end
+    if rest ~= "" then
+      local item = parse_line((rest:gsub("\r$", "")))
+      if item then count = count + 1; self:push_result(item) end
+    end
+    local code = proc:wait(5)
+    drain_stderr(proc, err)
+    if self.proc == proc then self.proc = nil end
+    return count, code, err.text
+  end
+
+  core.add_thread(function()
+    local count, code, err = fn(run)
+    if self.search_gen ~= gen then return end
+    if self.results_stale then
+      -- nothing found: drop the previous results
+      self.results_stale = false
+      self.results       = {}
+    end
+    if count == 0 and code ~= 0 and err and err ~= "" then
+      -- one line for the status row, e.g. rg's multi-line regex errors
+      self.search_error = err:gsub("%s+", " "):match("^%s*(.-)%s*$"):sub(1, 200)
+    end
+    if opts.base then self.base_results = self.results end
+    self.searching = false
+    self:update_filter(false)
+  end)
+end
+
+-- Shows the results of the unfiltered search again without re-running it.
+-- Returns false when there are none (the base search never completed).
+function ListView:restore_base_results()
+  if not self.base_results then return false end
+  self:cancel_search()
+  self.results_stale = false
+  self.search_error  = nil
+  self.live_text     = ""
+  self.results       = self.base_results
+  self:update_filter(true)
+  return true
+end
+
+-- Calls live_search() once the filter text has not changed for live_delay.
+function ListView:schedule_live_search()
+  self.live_seq = self.live_seq + 1
+  if not self.live_search then return end
+  local seq = self.live_seq
+  core.add_thread(function()
+    coroutine.yield(config.plugins.listview.live_delay)
+    if seq ~= self.live_seq or ListView._overlay_view ~= self then return end
+    local text = filter_text(self)
+    if text ~= self.live_text then self:live_search(text) end
+  end)
+end
+
+-- ---------------------------------------------------------------------------
 -- Abstract methods (subclass must override)
 -- ---------------------------------------------------------------------------
 
 function ListView:get_item_text(item)
   return tostring(item)
+end
+
+-- Filter text as matched against get_item_text().
+function ListView:get_filter_needle(text)
+  return text
 end
 
 function ListView:get_status_text()
@@ -186,6 +375,8 @@ end
 function ListView:close()
   if ListView._overlay_view ~= self then return end
   ListView._overlay_view = nil
+  self:cancel_search()
+  self.live_seq = self.live_seq + 1
   -- Only restore previous focus if we still own it.
   -- If open_selected() already moved focus to the editor, leave it there.
   if core.active_view == self then
@@ -314,6 +505,10 @@ function ListView:update()
   if cid ~= self.filter_change_id then
     self.filter_change_id = cid
     self:update_filter(true)
+    self:schedule_live_search()
+  elseif self.filter_dirty
+    and system.get_time() - self.last_filter_time >= REFILTER_INTERVAL then
+    self:update_filter(false)
   end
 end
 
