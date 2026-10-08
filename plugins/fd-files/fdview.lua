@@ -14,7 +14,7 @@ config.plugins.fd_files = common.merge({
 }, config.plugins.fd_files)
 
 local function is_remote(path)
-  local ok, remote = pcall(require, "core.remote")
+  local ok, remote = pcall(require, "plugins.thither")
   return ok and remote.is_remote(path)
 end
 
