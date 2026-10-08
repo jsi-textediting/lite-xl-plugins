@@ -29,7 +29,7 @@ up.use 'indentguideex'
 up.use 'isearch'
 up.use 'killring'
 up.use 'rgsearch'
-up.use 'treesit'
+up.use 'thither'   -- bundled with the stonewell fork; the repo copy wins when newer
 up.use 'whichkey'
 ```
 
@@ -69,7 +69,7 @@ Or interactively through Lite-XL commands:
 | [`killring`](plugins/killring) | 0.1.0 | Emacs-style clipboard history with searchable listview overlay. | `shared` |
 | [`rgsearch`](plugins/rgsearch) | 0.1.0 | Fast project-wide search overlay powered by `ripgrep`. | `shared` |
 | [`shared`](plugins/shared) | 0.1.0 | Shared `listview` overlay base class and search helpers. | - |
-| [`treesit`](plugins/treesit) | 0.1.0 | Tree-sitter syntax highlighting with Neovim parser auto-detection. | - |
+| [`thither`](plugins/thither) | 0.1.0 | Remote editing over ssh through `thither-server` (needs the [stonewell Lite XL fork](https://github.com/stonewell/lite-xl)). | - |
 | [`use_package`](plugins/use_package) | 0.2.0 | Declarative package and plugin manager for Lite-XL. | - |
 | [`whichkey`](plugins/whichkey) | 0.1.0 | Key continuation popup panel after prefix key combinations. | - |
 
