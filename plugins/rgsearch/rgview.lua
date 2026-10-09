@@ -51,7 +51,7 @@ end
 function RgView:get_status_text()
   local ft = self.filter_doc:get_text(1, 1, 1, math.huge)
   if self.searching then
-    return string.format("Searching (%d matches) for %q...", #self.results, self.query)
+    return string.format("Searching (%d matches) for %q...", self:get_result_count(), self.query)
   elseif self.search_error then
     return self.search_error
   end

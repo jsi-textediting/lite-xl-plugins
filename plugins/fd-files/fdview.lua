@@ -13,9 +13,12 @@ config.plugins.fd_files = common.merge({
   live_min_chars = 1,     -- shorter filter text only filters the loaded results
 }, config.plugins.fd_files)
 
+-- Only consults thither when it is loaded: requiring it would load a disabled
+-- plugin, and it returns no module where it is unsupported.
 local function is_remote(path)
-  local ok, remote = pcall(require, "plugins.thither")
-  return ok and remote.is_remote(path)
+  local remote = package.loaded["plugins.thither"]
+  if type(remote) ~= "table" or not remote.is_remote then return false end
+  return remote.is_remote(path)
 end
 
 -- Filter text as a list of the characters it fuzzy-matches (spaces are
@@ -99,7 +102,7 @@ function FdView:get_status_text()
     where = string.format("%s matching %q", self.root, self.live_text)
   end
   if self.searching then
-    return string.format("Searching (%d files) in %s...", #self.results, where)
+    return string.format("Searching (%d files) in %s...", self:get_result_count(), where)
   elseif self.search_error then
     return self.search_error
   elseif ft ~= "" then

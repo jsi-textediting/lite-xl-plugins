@@ -120,7 +120,9 @@ function ListView:update_filter(reset_selection)
   local ft = filter_text(self)
   self.filter_dirty     = false
   self.last_filter_time = system.get_time()
-  if ft == "" or (self.live_exact and ft == self.live_text) then
+  -- stale results belong to the previous search, not to live_text: they are
+  -- narrowed by the filter text until the new search replaces them
+  if ft == "" or (self.live_exact and ft == self.live_text and not self.results_stale) then
     self.filtered_results = self.results
   else
     local matches = {}
@@ -169,6 +171,12 @@ function ListView:push_result(item)
   core.redraw = true
 end
 
+-- Number of results found by the current search (0 while the previous
+-- search's results are still shown), for get_status_text().
+function ListView:get_result_count()
+  return self.results_stale and 0 or #self.results
+end
+
 -- Stops the running search, if any, and kills its process.
 function ListView:cancel_search()
   self.search_gen = self.search_gen + 1
@@ -200,7 +208,7 @@ function ListView:start_search(fn, opts)
   self.searching     = true
   self.search_error  = nil
   self.results_stale = true
-  core.redraw = true
+  self:update_filter(false)
 
   local function run(cmd, parse_line, max_results)
     if self.search_gen ~= gen then return 0 end
@@ -260,8 +268,14 @@ function ListView:start_search(fn, opts)
   end
 
   core.add_thread(function()
-    local count, code, err = fn(run)
+    local ok, count, code, err = pcall(fn, run)
     if self.search_gen ~= gen then return end
+    if not ok then
+      -- an error in fn must not leave the view searching forever
+      core.error("%s: search failed: %s", tostring(self), tostring(count))
+      if self.proc then pcall(self.proc.kill, self.proc); self.proc = nil end
+      count, code, err = 0, nil, tostring(count)
+    end
     if self.results_stale then
       -- nothing found: drop the previous results
       self.results_stale = false

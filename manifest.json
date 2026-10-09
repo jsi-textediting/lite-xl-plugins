@@ -46,7 +46,7 @@
       "id": "indentguideex",
       "name": "indentguideex",
       "version": "0.1.0",
-      "mod_version": "3",
+      "mod_version": "4",
       "description": "Enhanced indentation guides with active scope highlighting and style options",
       "path": "plugins/indentguideex",
       "type": "plugin"
@@ -88,7 +88,7 @@
       "id": "shared",
       "name": "shared",
       "version": "0.1.0",
-      "mod_version": "3",
+      "mod_version": "4",
       "description": "Shared listview overlay and search helpers for bufferex, fd-files, killring, and rgsearch",
       "path": "plugins/shared",
       "type": "plugin"
